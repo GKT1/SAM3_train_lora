@@ -1,0 +1,82 @@
+# SAM3 LoRA Training Configuration - LIGHT VERSION
+# Lighter LoRA configuration for memory-constrained training
+# Use this for faster iteration and lower memory usage
+
+# Dataset settings
+dataset:
+  # train_json: "/teamspace/studios/this_studio/Small_OpenEarthMap_COCO/train.json"
+  # val_json: "/teamspace/studios/this_studio/Small_OpenEarthMap_COCO/val.json"
+  # image_dir: "/teamspace/studios/this_studio/Small_OpenEarthMap_COCO/images"
+
+# Model settings
+model:
+  name: "facebook/sam3"
+  cache_dir: null
+
+# LoRA settings - REDUCED for memory efficiency
+lora:
+  rank: 8                   # Reduced from 32 (less capacity but faster)
+  alpha: 16                  # 2x rank
+  dropout: 0.1
+
+  # Target ONLY attention layers (skip MLP for memory savings)
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "out_proj"
+    # NOT including fc1/fc2 - saves memory
+
+  # Apply LoRA to FEWER components (memory optimization)
+  apply_to_vision_encoder: false   # Skip vision encoder (pre-trained features work well)
+  apply_to_text_encoder: true      # Keep text encoder (important for prompts)
+  apply_to_geometry_encoder: false # Skip geometry encoder
+  apply_to_detr_encoder: false     # Skip DETR encoder to save T4 VRAM
+  apply_to_detr_decoder: false     # Skip DETR decoder to save T4 VRAM
+  apply_to_mask_decoder: true      # Keep mask decoder (critical for final segmentation)
+
+# Training settings
+training:
+  data_dir: "/teamspace/studios/this_studio/Small_OpenEarthMap_COCO"
+  batch_size: 1         # T4 requires minimal batch size
+  num_workers: 2
+  
+  # Memory Optimization for many categories/objects
+  max_queries_per_image: 1   # Randomly sample 1 category if image has more
+
+  learning_rate: 1e-4        # Higher LR for lighter model
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1e-8
+  max_grad_norm: 1.0
+
+  num_epochs: 30
+  warmup_steps: 50
+  lr_scheduler: "cosine"
+
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 100
+  save_total_limit: 5
+
+  mixed_precision: "bf16"
+  seed: 42
+  gradient_accumulation_steps: 4  # Effective batch = 2 × 8 = 16
+
+output:
+  output_dir: "outputs/open_earth_map_light_lora"
+  logging_dir: "logs"
+  save_lora_only: true
+  push_to_hub: false
+  hub_model_id: null
+
+evaluation:
+  metric: "iou"
+  save_predictions: false
+  compute_metrics_during_training: true
+
+hardware:
+  device: "cuda"
+  dataloader_pin_memory: true
+  use_compile: false

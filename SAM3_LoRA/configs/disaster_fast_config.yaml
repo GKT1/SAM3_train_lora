@@ -1,0 +1,74 @@
+# SAM3 LoRA Configuration for Fast Disaster Damage Detection
+# Lightweight configuration based on crack_detection_config.yaml
+# Uses Rank 16 and skips DETR encoders/decoders for speed and memory efficiency
+
+# Model settings
+model:
+  name: "facebook/sam3"
+  cache_dir: null
+
+# LoRA settings
+lora:
+  rank: 16                    # Reduced rank (vs 32/64) for speed
+  alpha: 32                   # 2x rank
+  dropout: 0.1
+
+  # Target modules (Standard set)
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "out_proj"
+    - "fc1"
+    - "fc2"
+
+  # Component Selection - Lightweight Mode
+  apply_to_vision_encoder: true     # Essential for visual features
+  apply_to_text_encoder: true       # Enable text prompts
+  apply_to_geometry_encoder: false  # Skip geometry encoder
+  apply_to_detr_encoder: false      # Skip heavy DETR encoder
+  apply_to_detr_decoder: false      # Skip heavy DETR decoder
+  apply_to_mask_decoder: true       # Enable mask decoder
+
+# Training settings
+training:
+  data_dir: "../disaster_subset_coco"  # Correct path for our dataset
+  batch_size: 6      # Backing off from 8 (OOM)
+  num_workers: 4     # Keep workers high
+
+  learning_rate: 1e-4          # Higher LR for lower rank
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1e-8
+  max_grad_norm: 1.0
+
+  num_epochs: 50                # 50 epochs should be sufficient
+  warmup_steps: 100
+  lr_scheduler: "cosine"
+
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 100
+  save_total_limit: 3
+
+  mixed_precision: "bf16"
+  seed: 42
+  gradient_accumulation_steps: 2  # Effective batch size = 8 * 2 = 16
+
+output:
+  output_dir: "outputs/sam3_lora_fast"
+  logging_dir: "logs/sam3_lora_fast"
+  save_lora_only: true
+  push_to_hub: false
+  hub_model_id: null
+
+evaluation:
+  metric: "iou"
+  save_predictions: false
+  compute_metrics_during_training: true
+
+hardware:
+  device: "cuda"
+  dataloader_pin_memory: true
+  use_compile: false

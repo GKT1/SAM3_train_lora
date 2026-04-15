@@ -1,0 +1,13 @@
+# Ignore dataset and outputs
+# disaster_subset_coco/
+# test_data/ is NOT ignored so your 100 MQA images push successfully
+#outputs/
+logs/
+#*.log
+
+# Ignore python caches
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+test_data/
+disaster_subset_coco/

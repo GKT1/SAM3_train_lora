@@ -1,0 +1,92 @@
+[
+  {
+    "pre_image_path": "test_images\\turkey_earthquake4_pre_327.png",
+    "post_image_path": "test_images\\turkey_earthquake4_sar_post_327.png",
+    "image_type": "SAR",
+    "ground_truth": "masks\\test_building_intact_mask\\turkey_earthquake4_327.png",
+    "prompts": "Segment the buildings that are unaffected by the disaster.",
+    "task": "Referring Expression Segmentation",
+    "cls_description": "Building Damage Assessment"
+  },
+  {
+    "pre_image_path": "test_images\\hurricane_matthew_00000360_pre_disaster.png",
+    "post_image_path": "test_images\\hurricane_matthew_00000360_post_disaster.png",
+    "image_type": "Optical",
+    "ground_truth": "masks\\test_building_intact_mask\\hurricane_matthew_00000360.png",
+    "prompts": "Classify and separate the structurally sound buildings.",
+    "task": "Referring Expression Segmentation",
+    "cls_description": "Building Damage Assessment"
+  },
+  {
+    "pre_image_path": "test_images\\hurricane_matthew_00000134_pre_disaster.png",
+    "post_image_path": "test_images\\hurricane_matthew_00000134_post_disaster.png",
+    "image_type": "Optical",
+    "ground_truth": "masks\\test_building_intact_mask\\hurricane_matthew_00000134.png",
+    "prompts": "Find and segment buildings that are not damaged.",
+    "task": "Referring Expression Segmentation",
+    "cls_description": "Building Damage Assessment"
+  },
+  {
+    "pre_image_path": "test_images\\santa_rosa_wildfire_00000224_pre_disaster.png",
+    "post_image_path": "test_images\\santa_rosa_wildfire_00000224_post_disaster.png",
+    "image_type": "Optical",
+    "ground_truth": "masks\\test_building_intact_mask\\santa_rosa_wildfire_00000224.png",
+    "prompts": "Classify and segment the undamaged buildings.",
+    "task": "Referring Expression Segmentation",
+    "cls_description": "Building Damage Assessment"
+  },
+  {
+    "pre_image_path": "test_images\\mexico_earthquake_00000080_pre_disaster.png",
+    "post_image_path": "test_images\\mexico_earthquake_00000080_post_disaster.png",
+    "image_type": "Optical",
+    "ground_truth": "masks\\test_building_intact_mask\\mexico_earthquake_00000080.png",
+    "prompts": "Segment the buildings that are unaffected by the disaster.",
+    "task": "Referring Expression Segmentation",
+    "cls_description": "Building Damage Assessment"
+  },
+  {
+    "pre_image_path": "test_images\\noto_earthquake_pre_157.png",
+    "post_image_path": "test_images\\noto_earthquake_post_157.png",
+    "image_type": "Optical",
+    "ground_truth": "masks\\test_building_intact_mask\\noto_earthquake_157.png",
+    "prompts": "Classify and segment the undamaged buildings.",
+    "task": "Referring Expression Segmentation",
+    "cls_description": "Building Damage Assessment"
+  },
+  {
+    "pre_image_path": "test_images\\ian_hurricane_pre_714.png",
+    "post_image_path": "test_images\\ian_hurricane_post_714.png",
+    "image_type": "Optical",
+    "ground_truth": "masks\\test_building_intact_mask\\ian_hurricane_714.png",
+    "prompts": "Identify and delineate buildings that are intact.",
+    "task": "Referring Expression Segmentation",
+    "cls_description": "Building Damage Assessment"
+  },
+  {
+    "pre_image_path": "test_images\\joplin_tornado_00000071_pre_disaster.png",
+    "post_image_path": "test_images\\joplin_tornado_00000071_post_disaster.png",
+    "image_type": "Optical",
+    "ground_truth": "masks\\test_building_intact_mask\\joplin_tornado_00000071.png",
+    "prompts": "Find and segment buildings that are not damaged.",
+    "task": "Referring Expression Segmentation",
+    "cls_description": "Building Damage Assessment"
+  },
+  {
+    "pre_image_path": "test_images\\mexico_earthquake_00000109_pre_disaster.png",
+    "post_image_path": "test_images\\mexico_earthquake_00000109_post_disaster.png",
+    "image_type": "Optical",
+    "ground_truth": "masks\\test_building_intact_mask\\mexico_earthquake_00000109.png",
+    "prompts": "Classify and separate the structurally sound buildings.",
+    "task": "Referring Expression Segmentation",
+    "cls_description": "Building Damage Assessment"
+  },
+  {
+    "pre_image_path": "test_images\\pinery_bushfire_00000350_pre_disaster.png",
+    "post_image_path": "test_images\\pinery_bushfire_00000350_post_disaster.png",
+    "image_type": "Optical",
+    "ground_truth": "masks\\test_building_intact_mask\\pinery_bushfire_00000350.png",
+    "prompts": "Classify and segment the undamaged buildings.",
+    "task": "Referring Expression Segmentation",
+    "cls_description": "Building Damage Assessment"
+  }
+]
