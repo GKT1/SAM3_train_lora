@@ -1153,6 +1153,7 @@ class SAM3TrainerNative:
             if has_validation and val_loader is not None:
                 self.model.eval()
                 val_losses = []
+                val_losses_core = []
 
                 with torch.no_grad():
                     val_pbar = tqdm(val_loader, desc=f"Validation", disable=not is_main_process())
@@ -1188,19 +1189,23 @@ class SAM3TrainerNative:
                         # Compute loss using Sam3LossWrapper
                         loss_dict = self.loss_wrapper(outputs_list, find_targets)
                         total_loss = loss_dict[CORE_LOSS_KEY]
+                        total_loss_core = loss_dict.get(CORE_LOSS_KEY + "_core_only", total_loss)
 
                         val_losses.append(total_loss.item())
-                        val_pbar.set_postfix({"val_loss": total_loss.item()})
+                        val_losses_core.append(total_loss_core.item())
+                        val_pbar.set_postfix({"val_loss": total_loss.item(), "val_loss_core": total_loss_core.item()})
 
                 avg_val_loss = sum(val_losses) / len(val_losses)
+                avg_val_loss_core = sum(val_losses_core) / len(val_losses_core)
 
                 # Synchronize val_loss across all processes for consistent best model selection
                 if self.multi_gpu:
-                    val_loss_tensor = torch.tensor([avg_val_loss], device=self.device)
+                    val_loss_tensor = torch.tensor([avg_val_loss, avg_val_loss_core], device=self.device)
                     dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
-                    avg_val_loss = val_loss_tensor.item()
+                    avg_val_loss = val_loss_tensor[0].item()
+                    avg_val_loss_core = val_loss_tensor[1].item()
 
-                print_rank0(f"\nEpoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f} (Core Only: {avg_train_loss_core:.6f}), Val Loss: {avg_val_loss:.6f}")
+                print_rank0(f"\nEpoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f} (Core Only: {avg_train_loss_core:.6f}), Val Loss: {avg_val_loss:.6f} (Core Only: {avg_val_loss_core:.6f})")
 
                 # MQA Evaluation
                 if self.eval_mqa and is_main_process():
@@ -1264,6 +1269,7 @@ class SAM3TrainerNative:
                     checkpoint_data = {
                         "epoch": overall_epoch,
                         "val_loss": avg_val_loss,
+                        "val_loss_core": avg_val_loss_core,
                         "train_loss": avg_train_loss,
                         "train_loss_core": avg_train_loss_core
                     }
@@ -1291,7 +1297,8 @@ class SAM3TrainerNative:
                             "epoch": overall_epoch,
                             "train_loss": avg_train_loss,
                             "train_loss_core": avg_train_loss_core,
-                            "val_loss": avg_val_loss
+                            "val_loss": avg_val_loss,
+                            "val_loss_core": avg_val_loss_core
                         }) + "\n")
 
                 torch.cuda.empty_cache()
