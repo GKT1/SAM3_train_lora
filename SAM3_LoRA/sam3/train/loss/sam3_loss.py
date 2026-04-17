@@ -98,6 +98,7 @@ class Sam3LossWrapper(torch.nn.Module):
         # Compute all the requested losses
         losses = {}
         total_core_loss = 0.0
+        total_core_loss_final = 0.0
         for out, suffix, is_aux in output_list:
             # o2o matcher indices need to be computed by the model (as the video model requires
             # a specific way of matching free and locked indices beyond just calling the matcher)
@@ -132,7 +133,10 @@ class Sam3LossWrapper(torch.nn.Module):
                     num_boxes=num_boxes,
                     is_aux=is_aux,
                 )
-                total_core_loss += l_dict.pop(CORE_LOSS_KEY)
+                core_l = l_dict.pop(CORE_LOSS_KEY)
+                total_core_loss += core_l
+                if not is_aux:
+                    total_core_loss_final += core_l # Only the core loss from the main (non-aux) output
                 losses.update({f"{k}{suffix}": v for k, v in l_dict.items()})
 
                 compute_o2m_loss = has_o2m_out
@@ -156,6 +160,7 @@ class Sam3LossWrapper(torch.nn.Module):
                     losses.update({f"{k}{suffix}_o2m": v for k, v in l_dict.items()})
 
         losses[CORE_LOSS_KEY] = total_core_loss
+        losses[CORE_LOSS_KEY + "_core_only"] = total_core_loss_final
         return losses
 
     def forward(self, find_stages: SAM3Output, find_targets):
@@ -188,6 +193,7 @@ class Sam3LossWrapper(torch.nn.Module):
                     # have a much higher loss scale due to summing the losses over all the find stages.)
                     if self.normalize_by_stage_num:
                         cur_losses[CORE_LOSS_KEY] /= len(find_stages)
+                        cur_losses[CORE_LOSS_KEY + "_core_only"] /= len(find_stages)
 
                     if self.scale_by_find_batch_size:
                         bs = targets["num_boxes"].shape[0]

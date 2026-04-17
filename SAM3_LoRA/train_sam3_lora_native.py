@@ -1082,6 +1082,7 @@ class SAM3TrainerNative:
 
             # Track training losses for this epoch
             train_losses = []
+            train_losses_core = []
 
             # Only show progress bar on rank 0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", disable=not is_main_process())
@@ -1127,6 +1128,7 @@ class SAM3TrainerNative:
                     # Compute loss
                     loss_dict = self.loss_wrapper(outputs_list, find_targets)
                     total_loss = loss_dict[CORE_LOSS_KEY]
+                    total_loss_core = loss_dict.get(CORE_LOSS_KEY + "_core_only", total_loss)
 
                 # Backward with scaling if fp16
                 self.optimizer.zero_grad()
@@ -1140,10 +1142,12 @@ class SAM3TrainerNative:
 
                 # Track training loss
                 train_losses.append(total_loss.item())
-                pbar.set_postfix({"loss": total_loss.item()})
+                train_losses_core.append(total_loss_core.item())
+                pbar.set_postfix({"loss": total_loss.item(), "loss_core": total_loss_core.item()})
 
             # Calculate average training loss for this epoch
             avg_train_loss = sum(train_losses) / len(train_losses) if train_losses else 0.0
+            avg_train_loss_core = sum(train_losses_core) / len(train_losses_core) if train_losses_core else 0.0
 
             # Validation (only compute loss - no metrics, like SAM3)
             if has_validation and val_loader is not None:
@@ -1196,7 +1200,7 @@ class SAM3TrainerNative:
                     dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
                     avg_val_loss = val_loss_tensor.item()
 
-                print_rank0(f"\nEpoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
+                print_rank0(f"\nEpoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f} (Core Only: {avg_train_loss_core:.6f}), Val Loss: {avg_val_loss:.6f}")
 
                 # MQA Evaluation
                 if self.eval_mqa and is_main_process():
@@ -1260,7 +1264,8 @@ class SAM3TrainerNative:
                     checkpoint_data = {
                         "epoch": overall_epoch,
                         "val_loss": avg_val_loss,
-                        "train_loss": avg_train_loss
+                        "train_loss": avg_train_loss,
+                        "train_loss_core": avg_train_loss_core
                     }
                     
                     # 1. Save last weights (overwrite each epoch)
@@ -1285,6 +1290,7 @@ class SAM3TrainerNative:
                         f.write(json.dumps({
                             "epoch": overall_epoch,
                             "train_loss": avg_train_loss,
+                            "train_loss_core": avg_train_loss_core,
                             "val_loss": avg_val_loss
                         }) + "\n")
 
