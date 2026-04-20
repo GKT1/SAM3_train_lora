@@ -773,13 +773,14 @@ def create_coco_gt_from_dataset_original_res(dataset, image_ids=None, debug=Fals
 
 
 class SAM3TrainerNative:
-    def __init__(self, config_path, multi_gpu=False, max_train_samples=None, eval_mqa=False, resume_from=None):
+    def __init__(self, config_path, multi_gpu=False, max_train_samples=None, eval_mqa=False, resume_from=None, eval_epoch_0=False):
         with open(config_path, "r") as f:
             self.config = yaml.safe_load(f)
 
         self.max_train_samples = max_train_samples
         self.eval_mqa = eval_mqa
         self.resume_from = resume_from
+        self.eval_epoch_0 = eval_epoch_0
 
         # Multi-GPU setup
         self.multi_gpu = multi_gpu
@@ -1073,6 +1074,136 @@ class SAM3TrainerNative:
         out_dir = Path(self.config["output"]["output_dir"])
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        def run_validation_and_mqa(epoch_num, is_epoch_0=False, avg_train_loss=0.0, avg_train_loss_core=0.0):
+            if not has_validation or val_loader is None:
+                return float('inf'), float('inf')
+                
+            self.model.eval()
+            val_losses = []
+            val_losses_core = []
+
+            with torch.no_grad():
+                desc = "Validation (Epoch 0 Base)" if is_epoch_0 else f"Validation (Epoch {epoch_num+1})"
+                val_pbar = tqdm(val_loader, desc=desc, disable=not is_main_process())
+
+                for batch_dict in val_pbar:
+                    input_batch = batch_dict["input"]
+                    input_batch = move_to_device(input_batch, self.device)
+
+                    # Forward pass
+                    outputs_list = self.model(input_batch)
+
+                    # Prepare targets
+                    find_targets = [self._unwrapped_model.back_convert(target) for target in input_batch.find_targets]
+
+                    # Move targets to device
+                    for targets in find_targets:
+                        for k, v in targets.items():
+                            if isinstance(v, torch.Tensor):
+                                targets[k] = v.to(self.device)
+
+                    # Add matcher indices to outputs
+                    with SAM3Output.iteration_mode(
+                        outputs_list, iter_mode=SAM3Output.IterMode.ALL_STEPS_PER_STAGE
+                    ) as outputs_iter:
+                        for stage_outputs, stage_targets in zip(outputs_iter, find_targets):
+                            stage_targets_list = [stage_targets] * len(stage_outputs)
+                            for outputs, targets in zip(stage_outputs, stage_targets_list):
+                                outputs["indices"] = self.matcher(outputs, targets)
+                                if "aux_outputs" in outputs:
+                                    for aux_out in outputs["aux_outputs"]:
+                                        aux_out["indices"] = self.matcher(aux_out, targets)
+
+                    # Compute loss
+                    loss_dict = self.loss_wrapper(outputs_list, find_targets)
+                    total_loss = loss_dict[CORE_LOSS_KEY]
+                    total_loss_core = loss_dict.get(CORE_LOSS_KEY + "_core_only", total_loss)
+
+                    val_losses.append(total_loss.item())
+                    val_losses_core.append(total_loss_core.item())
+                    val_pbar.set_postfix({"val_loss": total_loss.item(), "val_loss_core": total_loss_core.item()})
+
+            avg_val_loss_epoch = sum(val_losses) / len(val_losses) if val_losses else 0.0
+            avg_val_loss_core_epoch = sum(val_losses_core) / len(val_losses_core) if val_losses_core else 0.0
+
+            # Synchronize val_loss
+            if self.multi_gpu:
+                val_loss_tensor = torch.tensor([avg_val_loss_epoch, avg_val_loss_core_epoch], device=self.device)
+                dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
+                avg_val_loss_epoch = val_loss_tensor[0].item()
+                avg_val_loss_core_epoch = val_loss_tensor[1].item()
+
+            if is_epoch_0:
+                print_rank0(f"\nEpoch 0 (Base Model) - Val Loss: {avg_val_loss_epoch:.6f} (Core Only: {avg_val_loss_core_epoch:.6f})")
+            else:
+                print_rank0(f"\nEpoch {epoch_num+1}/{epochs} - Train Loss: {avg_train_loss:.6f} (Core Only: {avg_train_loss_core:.6f}), Val Loss: {avg_val_loss_epoch:.6f} (Core Only: {avg_val_loss_core_epoch:.6f})")
+
+            # MQA Evaluation
+            if self.eval_mqa and is_main_process():
+                try:
+                    import sys
+                    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+                    from sam3_core.mqa_evaluator import evaluate_mqa_on_dataset
+                    
+                    mqa_categories = {
+                        "Road": "../test_data/100_images_test/common_samples/sample_RDC.json",
+                        "Building": "../test_data/100_images_test/common_samples/sample_BDC.json"
+                    }
+                    
+                    epoch_mqa_results = {"epoch": 0 if is_epoch_0 else epoch_num + 1}
+                    all_acc = []
+                    all_mae = []
+                    
+                    print_rank0(f"\nRunning MQA Evaluation (Road & Building)...")
+                    for cat_name, scenario_path in mqa_categories.items():
+                        if not os.path.exists(scenario_path):
+                            continue
+                            
+                        res = evaluate_mqa_on_dataset(
+                            model=self.model.module if self.multi_gpu else self.model,
+                            device=self.device.type,
+                            scenarios_path=scenario_path,
+                            images_dir="../test_data/100_images_test/test_images",
+                            threshold=0.25
+                        )
+                        print_rank0(f"  {cat_name} MQA - Accuracy: {res['accuracy']:.2%} | MAE: {res['mae']:.3f}%")
+                        
+                        epoch_mqa_results[f"{cat_name.lower()}_accuracy"] = res['accuracy']
+                        epoch_mqa_results[f"{cat_name.lower()}_mae"] = res['mae']
+                        all_acc.append(res['accuracy'])
+                        all_mae.append(res['mae'])
+                    
+                    if all_acc:
+                        avg_acc = sum(all_acc) / len(all_acc)
+                        avg_mae = sum(all_mae) / len(all_mae)
+                        epoch_mqa_results["overall_accuracy"] = avg_acc
+                        epoch_mqa_results["overall_mae"] = avg_mae
+                        print_rank0(f"  OVERALL MQA - Accuracy: {avg_acc:.2%} | MAE: {avg_mae:.3f}%")
+                    
+                    with open(out_dir / "mqa_stats.json", "a") as f:
+                        f.write(json.dumps(epoch_mqa_results) + "\n")
+                except Exception as e:
+                    print_rank0(f"MQA Evaluation failed: {e}")
+
+            self.model.train()
+            return avg_val_loss_epoch, avg_val_loss_core_epoch
+
+        if self.eval_epoch_0:
+            print_rank0("\nRunning Epoch 0 evaluation (base model performance)...")
+            epoch_zero_num = self.start_epoch - 1 if self.start_epoch > 0 else 0
+            avg_val_loss, avg_val_loss_core = run_validation_and_mqa(epoch_zero_num, is_epoch_0=True)
+            
+            # Log epoch 0 to val_stats.json immediately
+            if is_main_process() and has_validation:
+                with open(out_dir / "val_stats.json", "a") as f:
+                    f.write(json.dumps({
+                        "epoch": 0,
+                        "train_loss": 0.0,
+                        "train_loss_core": 0.0,
+                        "val_loss": avg_val_loss,
+                        "val_loss_core": avg_val_loss_core
+                    }) + "\n")
+
         for epoch_idx in range(epochs):
             epoch = self.start_epoch + epoch_idx
             
@@ -1151,111 +1282,7 @@ class SAM3TrainerNative:
 
             # Validation (only compute loss - no metrics, like SAM3)
             if has_validation and val_loader is not None:
-                self.model.eval()
-                val_losses = []
-                val_losses_core = []
-
-                with torch.no_grad():
-                    val_pbar = tqdm(val_loader, desc=f"Validation", disable=not is_main_process())
-
-                    for batch_dict in val_pbar:
-                        input_batch = batch_dict["input"]
-                        input_batch = move_to_device(input_batch, self.device)
-
-                        # Forward pass
-                        outputs_list = self.model(input_batch)
-
-                        # Prepare targets
-                        find_targets = [self._unwrapped_model.back_convert(target) for target in input_batch.find_targets]
-
-                        # Move targets to device
-                        for targets in find_targets:
-                            for k, v in targets.items():
-                                if isinstance(v, torch.Tensor):
-                                    targets[k] = v.to(self.device)
-
-                        # Add matcher indices to outputs (required by Sam3LossWrapper)
-                        with SAM3Output.iteration_mode(
-                            outputs_list, iter_mode=SAM3Output.IterMode.ALL_STEPS_PER_STAGE
-                        ) as outputs_iter:
-                            for stage_outputs, stage_targets in zip(outputs_iter, find_targets):
-                                stage_targets_list = [stage_targets] * len(stage_outputs)
-                                for outputs, targets in zip(stage_outputs, stage_targets_list):
-                                    outputs["indices"] = self.matcher(outputs, targets)
-                                    if "aux_outputs" in outputs:
-                                        for aux_out in outputs["aux_outputs"]:
-                                            aux_out["indices"] = self.matcher(aux_out, targets)
-
-                        # Compute loss using Sam3LossWrapper
-                        loss_dict = self.loss_wrapper(outputs_list, find_targets)
-                        total_loss = loss_dict[CORE_LOSS_KEY]
-                        total_loss_core = loss_dict.get(CORE_LOSS_KEY + "_core_only", total_loss)
-
-                        val_losses.append(total_loss.item())
-                        val_losses_core.append(total_loss_core.item())
-                        val_pbar.set_postfix({"val_loss": total_loss.item(), "val_loss_core": total_loss_core.item()})
-
-                avg_val_loss = sum(val_losses) / len(val_losses)
-                avg_val_loss_core = sum(val_losses_core) / len(val_losses_core)
-
-                # Synchronize val_loss across all processes for consistent best model selection
-                if self.multi_gpu:
-                    val_loss_tensor = torch.tensor([avg_val_loss, avg_val_loss_core], device=self.device)
-                    dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
-                    avg_val_loss = val_loss_tensor[0].item()
-                    avg_val_loss_core = val_loss_tensor[1].item()
-
-                print_rank0(f"\nEpoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f} (Core Only: {avg_train_loss_core:.6f}), Val Loss: {avg_val_loss:.6f} (Core Only: {avg_val_loss_core:.6f})")
-
-                # MQA Evaluation
-                if self.eval_mqa and is_main_process():
-                    try:
-                        import sys
-                        # Use the explicit symbolic link to avoid module name collision
-                        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-                        from sam3_core.mqa_evaluator import evaluate_mqa_on_dataset
-                        
-                        mqa_categories = {
-                            "Road": "../test_data/100_images_test/common_samples/sample_RDC.json",
-                            "Building": "../test_data/100_images_test/common_samples/sample_BDC.json"
-                        }
-                        
-                        epoch_mqa_results = {"epoch": epoch + 1}
-                        all_acc = []
-                        all_mae = []
-                        
-                        print_rank0(f"\nRunning MQA Evaluation (Road & Building)...")
-                        for cat_name, scenario_path in mqa_categories.items():
-                            if not os.path.exists(scenario_path):
-                                print_rank0(f"  Warning: {cat_name} scenarios not found at {scenario_path}")
-                                continue
-                                
-                            res = evaluate_mqa_on_dataset(
-                                model=self.model.module if self.multi_gpu else self.model,
-                                device=self.device.type,
-                                scenarios_path=scenario_path,
-                                images_dir="../test_data/100_images_test/test_images",
-                                threshold=0.25 # Optimal threshold found via testing
-                            )
-                            print_rank0(f"  {cat_name} MQA - Accuracy: {res['accuracy']:.2%} | MAE: {res['mae']:.3f}%")
-                            
-                            epoch_mqa_results[f"{cat_name.lower()}_accuracy"] = res['accuracy']
-                            epoch_mqa_results[f"{cat_name.lower()}_mae"] = res['mae']
-                            all_acc.append(res['accuracy'])
-                            all_mae.append(res['mae'])
-                        
-                        if all_acc:
-                            avg_acc = sum(all_acc) / len(all_acc)
-                            avg_mae = sum(all_mae) / len(all_mae)
-                            epoch_mqa_results["overall_accuracy"] = avg_acc
-                            epoch_mqa_results["overall_mae"] = avg_mae
-                            print_rank0(f"  OVERALL MQA - Accuracy: {avg_acc:.2%} | MAE: {avg_mae:.3f}%")
-                        
-                        # Log MQA stats
-                        with open(out_dir / "mqa_stats.json", "a") as f:
-                            f.write(json.dumps(epoch_mqa_results) + "\n")
-                    except Exception as e:
-                        print_rank0(f"MQA Evaluation failed: {e}")
+                avg_val_loss, avg_val_loss_core = run_validation_and_mqa(epoch, is_epoch_0=False, avg_train_loss=avg_train_loss, avg_train_loss_core=avg_train_loss_core)
 
                 # Save models based on validation loss (only on rank 0)
                 if is_main_process():
@@ -1448,6 +1475,11 @@ Examples:
         action="store_true",
         help="Evaluate Multiple Choice Accuracy (MQA) on test data at the end of each epoch"
     )
+    parser.add_argument(
+        "--eval_epoch_0",
+        action="store_true",
+        help="Evaluate base model on validation set before training starts (Epoch 0)"
+    )
     args = parser.parse_args()
 
     # Determine if multi-GPU training is requested
@@ -1466,5 +1498,5 @@ Examples:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device[0])
             print(f"Using single GPU: {args.device[0]}")
 
-        trainer = SAM3TrainerNative(args.config, multi_gpu=multi_gpu, max_train_samples=args.max_train_samples, eval_mqa=args.eval_mqa, resume_from="outputs/sam3_lora_full/last_lora_weights.pt")
+        trainer = SAM3TrainerNative(args.config, multi_gpu=multi_gpu, max_train_samples=args.max_train_samples, eval_mqa=args.eval_mqa, resume_from="outputs/sam3_lora_full/last_lora_weights.pt", eval_epoch_0=args.eval_epoch_0)
         trainer.train()

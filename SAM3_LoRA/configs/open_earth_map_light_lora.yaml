@@ -15,7 +15,7 @@ model:
 
 # LoRA settings - REDUCED for memory efficiency
 lora:
-  rank: 8                   # Reduced from 32 (less capacity but faster)
+  rank: 16                   # Reduced from 32 (less capacity but faster)
   alpha: 16                  # 2x rank
   dropout: 0.1
 
@@ -37,14 +37,14 @@ lora:
 
 # Training settings
 training:
-  data_dir: "/teamspace/studios/this_studio/Small_OpenEarthMap_COCO"
+  data_dir: "/workspace/Small_OpenEarthMap_COCO"
   batch_size: 1         # T4 requires minimal batch size
   num_workers: 2
   
   # Memory Optimization for many categories/objects
-  max_queries_per_image: 1   # Randomly sample 1 category if image has more
+  #max_queries_per_image: 1   # Randomly sample 1 category if image has more
 
-  learning_rate: 1e-4        # Higher LR for lighter model
+  learning_rate: 1e-5        # Higher LR for lighter model
   weight_decay: 0.01
   adam_beta1: 0.9
   adam_beta2: 0.999
@@ -62,7 +62,7 @@ training:
 
   mixed_precision: "bf16"
   seed: 42
-  gradient_accumulation_steps: 4  # Effective batch = 2 × 8 = 16
+  gradient_accumulation_steps: 1  # Effective batch = 2 × 8 = 16
 
 output:
   output_dir: "outputs/open_earth_map_light_lora"
