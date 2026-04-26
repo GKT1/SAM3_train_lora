@@ -270,10 +270,15 @@ class COCOSegmentDataset(Dataset):
         if len(class_to_object_ids) > 0:
             category_names = list(class_to_object_ids.keys())
             
-            # Limit number of categories (queries) if needed (random sampling)
+            # Limit number of categories (queries) if needed
             if self.max_queries_per_image and len(category_names) > self.max_queries_per_image:
-                import random
-                category_names = random.sample(category_names, self.max_queries_per_image)
+                if self.split == "train":
+                    import torch
+                    indices = torch.randperm(len(category_names))[:self.max_queries_per_image]
+                    category_names = [category_names[i] for i in indices]
+                else:
+                    # Deterministic subset for validation to keep loss stable across epochs
+                    category_names = sorted(category_names)[:self.max_queries_per_image]
             
             for query_text in category_names:
                 obj_ids = class_to_object_ids[query_text]
@@ -773,11 +778,12 @@ def create_coco_gt_from_dataset_original_res(dataset, image_ids=None, debug=Fals
 
 
 class SAM3TrainerNative:
-    def __init__(self, config_path, multi_gpu=False, max_train_samples=None, eval_mqa=False, resume_from=None, eval_epoch_0=False):
+    def __init__(self, config_path, multi_gpu=False, max_train_samples=None, max_val_samples=None, eval_mqa=False, resume_from=None, eval_epoch_0=False):
         with open(config_path, "r") as f:
             self.config = yaml.safe_load(f)
 
         self.max_train_samples = max_train_samples
+        self.max_val_samples = max_val_samples
         self.eval_mqa = eval_mqa
         self.resume_from = resume_from
         self.eval_epoch_0 = eval_epoch_0
@@ -868,10 +874,16 @@ class SAM3TrainerNative:
         self._unwrapped_model = self.model.module if self.multi_gpu else self.model
 
         # Optimizer
+        beta1 = float(self.config["training"].get("adam_beta1", 0.9))
+        beta2 = float(self.config["training"].get("adam_beta2", 0.999))
+        eps = float(self.config["training"].get("adam_epsilon", 1e-8))
+        
         self.optimizer = AdamW(
             [p for p in self.model.parameters() if p.requires_grad],
             lr=float(self.config["training"]["learning_rate"]),
-            weight_decay=self.config["training"]["weight_decay"]
+            weight_decay=self.config["training"]["weight_decay"],
+            betas=(beta1, beta2),
+            eps=eps
         )
         
         # Setup Mixed Precision
@@ -972,6 +984,13 @@ class SAM3TrainerNative:
                 max_queries_per_image=max_queries
             )
             if len(val_ds) > 0:
+                if self.max_val_samples is not None and self.max_val_samples < len(val_ds):
+                    print_rank0(f"Limiting validation dataset to {self.max_val_samples} samples")
+                    import random
+                    random.seed(42)
+                    subset_indices = random.sample(range(len(val_ds.image_ids)), self.max_val_samples)
+                    val_ds.image_ids = [val_ds.image_ids[i] for i in subset_indices]
+
                 has_validation = True
                 print_rank0(f"Found validation data: {len(val_ds)} images")
             else:
@@ -1042,7 +1061,34 @@ class SAM3TrainerNative:
 
         epochs = self.config["training"]["num_epochs"]
         best_val_loss = float('inf')
-        print_rank0(f"Starting training for {epochs} epochs...")
+        
+        # Setup Gradient Accumulation and LR Scheduler
+        grad_accum_steps = self.config["training"].get("gradient_accumulation_steps", 1)
+        steps_per_epoch = (len(train_loader) + grad_accum_steps - 1) // grad_accum_steps
+        total_steps = steps_per_epoch * epochs
+        warmup_steps = self.config["training"].get("warmup_steps", 0)
+        
+        try:
+            from transformers import get_cosine_schedule_with_warmup
+            scheduler = get_cosine_schedule_with_warmup(
+                self.optimizer, 
+                num_warmup_steps=warmup_steps, 
+                num_training_steps=total_steps
+            )
+            
+            # Fast-forward the scheduler if resuming
+            completed_steps = self.start_epoch * steps_per_epoch
+            if completed_steps > 0:
+                print_rank0(f"Fast-forwarding LR scheduler by {completed_steps} steps to match resumed epoch {self.start_epoch}...")
+                for _ in range(completed_steps):
+                    scheduler.step()
+                    
+            print_rank0(f"Initialized Cosine LR Scheduler with {warmup_steps} warmup steps out of {total_steps} total steps.")
+        except ImportError:
+            print_rank0("WARNING: transformers library not found. Falling back to constant learning rate.")
+            scheduler = torch.optim.lr_scheduler.ConstantLR(self.optimizer, factor=1.0, total_iters=total_steps)
+
+        print_rank0(f"Starting training for {epochs} epochs with gradient_accumulation_steps={grad_accum_steps}...")
 
         if has_validation:
             print_rank0(f"Training samples: {len(train_ds)}, Validation samples: {len(val_ds)}")
@@ -1204,7 +1250,12 @@ class SAM3TrainerNative:
                         "val_loss_core": avg_val_loss_core
                     }) + "\n")
 
-        for epoch_idx in range(epochs):
+        remaining_epochs = epochs - self.start_epoch
+        if remaining_epochs <= 0:
+            print_rank0(f"Training already completed up to configured {epochs} epochs.")
+            return
+
+        for epoch_idx in range(remaining_epochs):
             epoch = self.start_epoch + epoch_idx
             
             # Set epoch for distributed sampler (required for proper shuffling)
@@ -1215,9 +1266,11 @@ class SAM3TrainerNative:
             train_losses = []
             train_losses_core = []
 
+            self.optimizer.zero_grad()
+
             # Only show progress bar on rank 0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", disable=not is_main_process())
-            for batch_dict in pbar:
+            for step, batch_dict in enumerate(pbar):
                 input_batch = batch_dict["input"]
 
                 # Move to device
@@ -1261,20 +1314,41 @@ class SAM3TrainerNative:
                     total_loss = loss_dict[CORE_LOSS_KEY]
                     total_loss_core = loss_dict.get(CORE_LOSS_KEY + "_core_only", total_loss)
 
-                # Backward with scaling if fp16
-                self.optimizer.zero_grad()
-                if self.mixed_precision == "fp16":
-                    self.scaler.scale(total_loss).backward()
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    total_loss.backward()
-                    self.optimizer.step()
+                # Scale loss by gradient accumulation steps
+                scaled_loss = total_loss / grad_accum_steps
 
-                # Track training loss
+                # Backward with scaling if fp16
+                if self.mixed_precision == "fp16":
+                    self.scaler.scale(scaled_loss).backward()
+                else:
+                    scaled_loss.backward()
+
+                # Step optimizer and scheduler
+                if (step + 1) % grad_accum_steps == 0 or (step + 1) == len(train_loader):
+                    if self.mixed_precision == "fp16":
+                        # Unscale gradients before clipping
+                        self.scaler.unscale_(self.optimizer)
+                        max_grad_norm = self.config["training"].get("max_grad_norm", 1.0)
+                        if max_grad_norm > 0:
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+                            
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        max_grad_norm = self.config["training"].get("max_grad_norm", 1.0)
+                        if max_grad_norm > 0:
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+                            
+                        self.optimizer.step()
+                        
+                    scheduler.step()
+                    self.optimizer.zero_grad()
+
+                # Track training loss (using unscaled total_loss for accurate reporting)
                 train_losses.append(total_loss.item())
                 train_losses_core.append(total_loss_core.item())
-                pbar.set_postfix({"loss": total_loss.item(), "loss_core": total_loss_core.item()})
+                current_lr = scheduler.get_last_lr()[0]
+                pbar.set_postfix({"loss": total_loss.item(), "loss_core": total_loss_core.item(), "lr": f"{current_lr:.2e}"})
 
             # Calculate average training loss for this epoch
             avg_train_loss = sum(train_losses) / len(train_losses) if train_losses else 0.0
@@ -1471,6 +1545,12 @@ Examples:
         help="Maximum number of training samples to use (for quick testing/control time)"
     )
     parser.add_argument(
+        "--max_val_samples",
+        type=int,
+        default=None,
+        help="Maximum number of validation samples to use (for quick testing/control time)"
+    )
+    parser.add_argument(
         "--eval_mqa",
         action="store_true",
         help="Evaluate Multiple Choice Accuracy (MQA) on test data at the end of each epoch"
@@ -1479,6 +1559,12 @@ Examples:
         "--eval_epoch_0",
         action="store_true",
         help="Evaluate base model on validation set before training starts (Epoch 0)"
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to a checkpoint file (e.g. outputs/open_earth_map_full_lora/last_lora_weights.pt) to resume training from"
     )
     args = parser.parse_args()
 
@@ -1498,5 +1584,5 @@ Examples:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device[0])
             print(f"Using single GPU: {args.device[0]}")
 
-        trainer = SAM3TrainerNative(args.config, multi_gpu=multi_gpu, max_train_samples=args.max_train_samples, eval_mqa=args.eval_mqa, resume_from="outputs/sam3_lora_full/last_lora_weights.pt", eval_epoch_0=args.eval_epoch_0)
+        trainer = SAM3TrainerNative(args.config, multi_gpu=multi_gpu, max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples, eval_mqa=args.eval_mqa, resume_from=args.resume, eval_epoch_0=args.eval_epoch_0)
         trainer.train()
