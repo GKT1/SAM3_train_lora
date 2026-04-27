@@ -109,17 +109,19 @@ def print_rank0(*args, **kwargs):
 
 class COCOSegmentDataset(Dataset):
     """Dataset class for COCO format segmentation data"""
-    def __init__(self, data_dir, split="train", max_queries_per_image=None):
+    def __init__(self, data_dir, split="train", max_queries_per_image=None, exclude_prompts=None):
         """
         Args:
             data_dir: Root directory containing train/valid/test folders
             split: One of 'train', 'valid', 'test'
             max_queries_per_image: Maximum number of categories/queries per image
+            exclude_prompts: List of prompt (category) names to exclude during training
         """
         self.data_dir = Path(data_dir)
         self.split = split
         self.split_dir = self.data_dir / split
         self.max_queries_per_image = max_queries_per_image
+        self.exclude_prompts = [p.lower() for p in exclude_prompts] if exclude_prompts else []
 
         # Load COCO annotations
         ann_file = self.split_dir / "_annotations.coco.json"
@@ -143,10 +145,24 @@ class COCOSegmentDataset(Dataset):
 
         # Load categories
         self.categories = {cat['id']: cat['name'] for cat in self.coco_data['categories']}
+        
+        # Determine included/excluded categories based on exclude_prompts
+        self.included_categories = {}
+        self.excluded_categories = {}
+        
+        for cat_id, cat_name in self.categories.items():
+            if cat_name.lower() in self.exclude_prompts:
+                self.excluded_categories[cat_id] = cat_name
+            else:
+                self.included_categories[cat_id] = cat_name
+                
         print(f"Loaded COCO dataset: {split} split")
         print(f"  Images: {len(self.image_ids)}")
         print(f"  Annotations: {len(self.coco_data['annotations'])}")
-        print(f"  Categories: {self.categories}")
+        print(f"  All Categories: {list(self.categories.values())}")
+        if self.exclude_prompts:
+            print(f"  Included Prompts: {list(self.included_categories.values())}")
+            print(f"  Excluded Prompts: {list(self.excluded_categories.values())}")
 
         self.resolution = 1008
         self.transform = v2.Compose([
@@ -191,6 +207,11 @@ class COCOSegmentDataset(Dataset):
 
             # Get class name from category_id
             category_id = ann.get("category_id", 0)
+            
+            # Skip excluded prompts
+            if category_id in self.excluded_categories:
+                continue
+                
             class_name = self.categories.get(category_id, "object")
             object_class_names.append(class_name)
 
@@ -245,7 +266,7 @@ class COCOSegmentDataset(Dataset):
             obj = Object(
                 bbox=box_tensor,
                 area=(box_tensor[2] * box_tensor[3]).item(),
-                object_id=i,
+                object_id=len(objects),
                 segment=segment
             )
             objects.append(obj)
@@ -273,7 +294,6 @@ class COCOSegmentDataset(Dataset):
             # Limit number of categories (queries) if needed
             if self.max_queries_per_image and len(category_names) > self.max_queries_per_image:
                 if self.split == "train":
-                    import torch
                     indices = torch.randperm(len(category_names))[:self.max_queries_per_image]
                     category_names = [category_names[i] for i in indices]
                 else:
@@ -778,7 +798,7 @@ def create_coco_gt_from_dataset_original_res(dataset, image_ids=None, debug=Fals
 
 
 class SAM3TrainerNative:
-    def __init__(self, config_path, multi_gpu=False, max_train_samples=None, max_val_samples=None, eval_mqa=False, resume_from=None, eval_epoch_0=False):
+    def __init__(self, config_path, multi_gpu=False, max_train_samples=None, max_val_samples=None, eval_mqa=False, resume_from=None, eval_epoch_0=False, exclude_prompts=None):
         with open(config_path, "r") as f:
             self.config = yaml.safe_load(f)
 
@@ -787,6 +807,7 @@ class SAM3TrainerNative:
         self.eval_mqa = eval_mqa
         self.resume_from = resume_from
         self.eval_epoch_0 = eval_epoch_0
+        self.exclude_prompts = exclude_prompts
 
         # Multi-GPU setup
         self.multi_gpu = multi_gpu
@@ -961,7 +982,8 @@ class SAM3TrainerNative:
         train_ds = COCOSegmentDataset(
             data_dir=data_dir, 
             split="train",
-            max_queries_per_image=max_queries
+            max_queries_per_image=max_queries,
+            exclude_prompts=self.exclude_prompts
         )
 
         if self.max_train_samples is not None and self.max_train_samples < len(train_ds):
@@ -981,7 +1003,8 @@ class SAM3TrainerNative:
             val_ds = COCOSegmentDataset(
                 data_dir=data_dir, 
                 split="valid",
-                max_queries_per_image=max_queries
+                max_queries_per_image=max_queries,
+                exclude_prompts=self.exclude_prompts
             )
             if len(val_ds) > 0:
                 if self.max_val_samples is not None and self.max_val_samples < len(val_ds):
@@ -1566,6 +1589,13 @@ Examples:
         default=None,
         help="Path to a checkpoint file (e.g. outputs/open_earth_map_full_lora/last_lora_weights.pt) to resume training from"
     )
+    parser.add_argument(
+        "--exclude_prompts",
+        type=str,
+        nargs="+",
+        default=None,
+        help="List of prompts (categories) to exclude during training"
+    )
     args = parser.parse_args()
 
     # Determine if multi-GPU training is requested
@@ -1584,5 +1614,5 @@ Examples:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device[0])
             print(f"Using single GPU: {args.device[0]}")
 
-        trainer = SAM3TrainerNative(args.config, multi_gpu=multi_gpu, max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples, eval_mqa=args.eval_mqa, resume_from=args.resume, eval_epoch_0=args.eval_epoch_0)
+        trainer = SAM3TrainerNative(args.config, multi_gpu=multi_gpu, max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples, eval_mqa=args.eval_mqa, resume_from=args.resume, eval_epoch_0=args.eval_epoch_0, exclude_prompts=args.exclude_prompts)
         trainer.train()

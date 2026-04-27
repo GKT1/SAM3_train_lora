@@ -15,8 +15,8 @@ model:
 
 # LoRA settings - REDUCED for memory efficiency
 lora:
-  rank: 32                   # Reduced from 64 to avoid OOM
-  alpha: 32                  # 2x rank (scaling factor)
+  rank: 64                   # Reduced from 64 to avoid OOM
+  alpha: 128                  # 2x rank (scaling factor)
   dropout: 0.1               # Some dropout for regularization
 
   target_modules:
@@ -48,13 +48,13 @@ lora:
 # Training settings
 training:
   data_dir: "/workspace/Small_OpenEarthMap_COCO"
-  batch_size: 3         # T4 requires minimal batch size
+  batch_size: 1         # T4 requires minimal batch size
   num_workers: 4
   
   # Memory Optimization for many categories/objects
   max_queries_per_image: 1   # Randomly sample 1 category if image has more
 
-  learning_rate: 1e-5        # Increased from 1e-5 (SAM3 uses 1e-4 to 5e-4 for fine-tuning)
+  learning_rate: 5e-5        # Increased from 1e-5 (SAM3 uses 1e-4 to 5e-4 for fine-tuning)
   weight_decay: 0.01
   adam_beta1: 0.9
   adam_beta2: 0.999
@@ -75,7 +75,7 @@ training:
   gradient_accumulation_steps: 8  # Effective batch = 2 × 8 = 16
 
 output:
-  output_dir: "outputs/open_earth_map_full_lora"
+  output_dir: "outputs/open_earth_map_full_lora_rank64"
   logging_dir: "logs"
   save_lora_only: true
   push_to_hub: false
